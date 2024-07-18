@@ -1,3 +1,4 @@
+import time
 from flask import Flask, request, jsonify
 import os
 import re
@@ -10,12 +11,14 @@ app = Flask(__name__)
 # Load environment variables from .env file
 load_dotenv()
 
-# Parse the FILTER_FROM_NAME environment variable as a list of names
+# Parse environment variables
 FILTER_FROM_NAMES = [name.strip() for name in os.getenv('FILTER_FROM_NAME').split(',')]
 INFURA_URL = os.getenv('INFURA_URL')
 WETH_ADDRESS = '0xC02aaA39b223FE8D0A0E5C4F27eAD9083C756Cc2'
 UNISWAP_V2_FACTORY_ADDRESS = '0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f'
 AMOUNT_OF_ETH = float(os.getenv('AMOUNT_OF_ETH'))
+PRICE_INCREASE_THRESHOLD = float(os.getenv('PRICE_INCREASE_THRESHOLD')) / 100  # Convert to fraction
+PRICE_DECREASE_THRESHOLD = float(os.getenv('PRICE_DECREASE_THRESHOLD')) / 100  # Convert to fraction
 
 # Initialize web3
 web3 = Web3(Web3.HTTPProvider(INFURA_URL))
@@ -110,6 +113,31 @@ def get_token_price(token_address, token_decimals):
 def calculate_token_amount(eth_amount, token_price):
     return eth_amount / token_price
 
+def monitor_price(token_address, initial_price, token_decimals):
+    while True:
+        current_price, _ = get_token_price(token_address, token_decimals)
+        if current_price is None:
+            print("Failed to fetch the current price.")
+            continue
+
+        price_increase = (current_price - initial_price) / initial_price
+        price_decrease = (initial_price - current_price) / initial_price
+
+        if price_increase >= PRICE_INCREASE_THRESHOLD:
+            print(f"Token price increased by {price_increase * 100}%. Selling the token.")
+            break
+        elif price_decrease >= PRICE_DECREASE_THRESHOLD:
+            print(f"Token price decreased by {price_decrease * 100}%. Selling the token.")
+            break
+
+        print(f"Current price: {current_price} ETH. Monitoring...")
+        time.sleep(5)
+
+    # Calculate and print the amount of ETH received from the sale
+    token_amount = calculate_token_amount(AMOUNT_OF_ETH, initial_price)
+    eth_received = token_amount * current_price
+    print(f"Would have sold {token_amount} for approximately {eth_received} ETH.")
+
 @app.route('/transaction', methods=['POST'])
 def transaction():
     data = request.json
@@ -129,14 +157,16 @@ def transaction():
             print(f"Token name: {name}")
             print(f"Token symbol: {symbol}")
             print()
-            token_price, pair_address = get_token_price(token_address, decimals)
-            if token_price is not None:
+            initial_price, pair_address = get_token_price(token_address, decimals)
+            if initial_price is not None:
                 print(f"Pair address: {pair_address}")
                 print()
-                print(f"Token price: {token_price} ETH")
+                print(f"Token price: {initial_price} ETH")
                 print()
-                token_amount = calculate_token_amount(AMOUNT_OF_ETH, token_price)
-                print(f"Approximately {token_amount} {symbol} tokens can be purchased for {AMOUNT_OF_ETH} ETH.")
+                token_amount = calculate_token_amount(AMOUNT_OF_ETH, initial_price)
+                print(f"Approximately {token_amount} {symbol} would be purchased for {AMOUNT_OF_ETH} ETH.")
+                print()
+                monitor_price(token_address, initial_price, decimals)
             else:
                 print("Token price not available.")
         else:
