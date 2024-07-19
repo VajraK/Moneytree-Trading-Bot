@@ -1,8 +1,9 @@
-import time
+import asyncio
 from flask import Flask, request, jsonify
 import os
 import re
 import json
+import requests
 from web3 import Web3
 from dotenv import load_dotenv
 
@@ -19,6 +20,8 @@ UNISWAP_V2_FACTORY_ADDRESS = '0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f'
 AMOUNT_OF_ETH = float(os.getenv('AMOUNT_OF_ETH'))
 PRICE_INCREASE_THRESHOLD = float(os.getenv('PRICE_INCREASE_THRESHOLD')) / 100  # Convert to fraction
 PRICE_DECREASE_THRESHOLD = float(os.getenv('PRICE_DECREASE_THRESHOLD')) / 100  # Convert to fraction
+TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
 # Initialize web3
 web3 = Web3(Web3.HTTPProvider(INFURA_URL))
@@ -36,6 +39,33 @@ with open('IUniswapV2ERC20.json') as file:
 
 # Create factory contract instance
 uniswap_v2_factory = web3.eth.contract(address=Web3.to_checksum_address(UNISWAP_V2_FACTORY_ADDRESS), abi=uniswap_v2_factory_abi)
+
+def send_telegram_message(message):
+    """
+    Sends a message to the configured Telegram chat.
+    """
+    url = f'https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage'
+    
+    # Escape special characters for MarkdownV2
+    escape_chars = r'\_~`>#+-=|{}.!'
+    escaped_message = re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', message)
+
+    data = {
+        'chat_id': TELEGRAM_CHAT_ID,
+        'text': escaped_message,
+        'parse_mode': 'MarkdownV2'
+    }
+
+    print(f"Sending Telegram message: {escaped_message}")  # Debug print
+
+    try:
+        response = requests.post(url, data=data)
+        response.raise_for_status()
+        print(f"Telegram response: {response.json()}")  # Debug print
+    except requests.exceptions.RequestException as e:
+        print(f"Error sending message to Telegram: {e}")
+        if response is not None:
+            print(f"Response content: {response.content}")
 
 def filter_message(data):
     from_name = data.get('from_name')
@@ -67,8 +97,12 @@ def filter_message(data):
     return False
 
 def extract_token_address(action_text):
-    # Use regex to find the token address in the action text
-    match = re.search(r'https://etherscan.io/token/0x[0-9a-fA-F]{40}', action_text)
+    # Use regex to find the token address in the action text after 'ETH For'
+    eth_for_index = action_text.find('ETH For')
+    if eth_for_index == -1:
+        return None
+    action_text_after_eth_for = action_text[eth_for_index:]
+    match = re.search(r'https://etherscan.io/token/0x[0-9a-fA-F]{40}', action_text_after_eth_for)
     if match:
         token_address = match.group().split('/')[-1]
         return token_address
@@ -113,33 +147,46 @@ def get_token_price(token_address, token_decimals):
 def calculate_token_amount(eth_amount, token_price):
     return eth_amount / token_price
 
-def monitor_price(token_address, initial_price, token_decimals):
+async def monitor_price(token_address, initial_price, token_decimals):
     while True:
         current_price, _ = get_token_price(token_address, token_decimals)
         if current_price is None:
             print("Failed to fetch the current price.")
+            await asyncio.sleep(5)
             continue
 
         price_increase = (current_price - initial_price) / initial_price
         price_decrease = (initial_price - current_price) / initial_price
 
         if price_increase >= PRICE_INCREASE_THRESHOLD:
+            print(f"Current price: {current_price} ETH. Monitoring...")
             print(f"Token price increased by {price_increase * 100}%. Selling the token.")
             break
         elif price_decrease >= PRICE_DECREASE_THRESHOLD:
+            print(f"Current price: {current_price} ETH. Monitoring...")
             print(f"Token price decreased by {price_decrease * 100}%. Selling the token.")
             break
 
         print(f"Current price: {current_price} ETH. Monitoring...")
-        time.sleep(5)
+        await asyncio.sleep(5)
 
     # Calculate and print the amount of ETH received from the sale
     token_amount = calculate_token_amount(AMOUNT_OF_ETH, initial_price)
     eth_received = token_amount * current_price
+    profit_or_loss = eth_received - AMOUNT_OF_ETH
     print(f"Would have sold {token_amount} for approximately {eth_received} ETH.")
+    
+    messageS = (
+        f'🟢 *SELL!* 🟢\n\n'
+        f'*From:*\n{from_name}\n\n'
+        f'*Original Transaction Hash:*\n{tx_hash}\n\n'
+        f'*Action:*\nSold {token_amount} [{symbol}](https://etherscan.io/token/{token_address}) for approximately {AMOUNT_OF_ETH} ETH.\n\n'
+        f'*Profit/Loss:*\n{profit_or_loss} ETH.'
+    )
+    send_telegram_message(messageS)
 
 @app.route('/transaction', methods=['POST'])
-def transaction():
+async def transaction():
     data = request.json
     print('—————————————————————————————————————————————————————————————————————————————————————————————————————————')
     print()
@@ -166,7 +213,19 @@ def transaction():
                 token_amount = calculate_token_amount(AMOUNT_OF_ETH, initial_price)
                 print(f"Approximately {token_amount} {symbol} would be purchased for {AMOUNT_OF_ETH} ETH.")
                 print()
-                monitor_price(token_address, initial_price, decimals)
+
+                # Send Telegram message for buy
+                from_name = data.get('from_name')
+                tx_hash = data.get('tx_hash')
+                messageB = (
+                    f'🟡 *BUY!* 🟡\n\n'
+                    f'*From:*\n{from_name}\n\n'
+                    f'*Original Transaction Hash:*\n{tx_hash}\n\n'
+                    f'*Action:*\nApproximately {token_amount} [{symbol}](https://etherscan.io/token/{token_address}) purchased for {AMOUNT_OF_ETH} ETH.'
+                )
+                send_telegram_message(messageB)
+
+                asyncio.create_task(monitor_price(token_address, initial_price, decimals))
             else:
                 print("Token price not available.")
         else:
