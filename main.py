@@ -180,15 +180,16 @@ async def monitor_price(token_address, initial_price, token_decimals, transactio
 
         price_increase = (current_price - initial_price) / initial_price
         price_decrease = (initial_price - current_price) / initial_price
+        percent_change = ((current_price - initial_price) / initial_price) * 100
 
         if price_increase >= PRICE_INCREASE_THRESHOLD:
-            logging.info(f"Monitoring {monitoring_id} — Current price: {current_price} ETH. — Token price increased by {price_increase * 100}%. Selling the token.")
+            logging.info(f"Monitoring {monitoring_id} — Current price: {current_price} ETH ({percent_change:.2f}%). — Token price increased by {price_increase * 100:.2f}%. Selling the token.")
             break
         elif price_decrease >= PRICE_DECREASE_THRESHOLD:
-            logging.info(f"Monitoring {monitoring_id} — Current price: {current_price} ETH. — Token price decreased by {price_decrease * 100}%. Selling the token.")
+            logging.info(f"Monitoring {monitoring_id} — Current price: {current_price} ETH ({percent_change:.2f}%). — Token price decreased by {price_decrease * 100:.2f}%. Selling the token.")
             break
 
-        logging.info(f"Monitoring {monitoring_id} — Current price: {current_price} ETH. — {token_amount} {symbol}.")
+        logging.info(f"Monitoring {monitoring_id} — Current price: {current_price} ETH ({percent_change:.2f}%). — {token_amount} {symbol}.")
         await asyncio.sleep(5)
 
     # Calculate and print the amount of ETH received from the sale
