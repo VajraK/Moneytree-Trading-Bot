@@ -169,10 +169,20 @@ def calculate_token_amount(eth_amount, token_price):
 
 def insert_zero_width_space(text):
     """
-    Inserts a zero-width space after the fifth digit in a sequence of exactly nine digits following a dot.
+    Inserts a zero-width space after the fifth digit in a sequence of exactly nine digits 
+    following a dot or nine digits preceding a dot.
     """
     zero_width_space = '\u200B'
-    return re.sub(r'(\.\d{5})(\d{4})(?=\D|$)', r'\1' + zero_width_space + r'\2', text)
+    
+    # Pattern for nine digits following a dot
+    pattern_following_dot = r'(\.\d{5})(\d{4})(?=\D|$)'
+    text = re.sub(pattern_following_dot, r'\1' + zero_width_space + r'\2', text)
+    
+    # Pattern for nine digits preceding a dot
+    pattern_preceding_dot = r'(\d{5})(\d{4}\.)(?=\D|$)'
+    text = re.sub(pattern_preceding_dot, r'\1' + zero_width_space + r'\2', text)
+    
+    return text
 
 async def monitor_price(token_address, initial_price, token_decimals, transaction_details):
     from_name = transaction_details['from_name']
