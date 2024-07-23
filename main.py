@@ -13,6 +13,10 @@ app = Flask(__name__)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger()
+file_handler = logging.FileHandler('mtdb_logs.log')
+file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+logger.addHandler(file_handler)
 
 # Load environment variables
 load_dotenv()
@@ -162,6 +166,13 @@ def get_token_price(token_address, token_decimals):
 def calculate_token_amount(eth_amount, token_price):
     return eth_amount / token_price
 
+def insert_zero_width_space(text):
+    """
+    Inserts a zero-width space after the fifth digit in a sequence of exactly nine digits following a dot.
+    """
+    zero_width_space = '\u200B'
+    return re.sub(r'(\.\d{5})(\d{4})(?=\D|$)', r'\1' + zero_width_space + r'\2', text)
+
 async def monitor_price(token_address, initial_price, token_decimals, transaction_details):
     from_name = transaction_details['from_name']
     tx_hash = transaction_details['tx_hash']
@@ -207,7 +218,7 @@ async def monitor_price(token_address, initial_price, token_decimals, transactio
         f'*Action:*\nSold {token_amount} [{symbol}](https://etherscan.io/token/{token_address}) for approximately {eth_received} ETH.\n\n'
         f'*Profit/Loss:*\n{profit_or_loss} ETH.'
     )
-    send_telegram_message(messageS)
+    send_telegram_message(insert_zero_width_space(messageS))
 
 @app.route('/transaction', methods=['POST'])
 async def transaction():
@@ -242,7 +253,7 @@ async def transaction():
                     f'*Original Transaction Hash:*\n{tx_hash_link}\n\n'
                     f'*Action:*\nApproximately {token_amount} [{symbol}](https://etherscan.io/token/{token_address}) purchased for {AMOUNT_OF_ETH} ETH.\n\n'
                 )
-                send_telegram_message(messageB)
+                send_telegram_message(insert_zero_width_space(messageB))
 
                 # Prepare transaction details for monitoring
                 transaction_details = {
