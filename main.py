@@ -32,6 +32,7 @@ PRICE_INCREASE_THRESHOLD = float(os.getenv('PRICE_INCREASE_THRESHOLD')) / 100  #
 PRICE_DECREASE_THRESHOLD = float(os.getenv('PRICE_DECREASE_THRESHOLD')) / 100  # Convert to fraction
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
+MOONBAG = float(os.getenv('MOONBAG', 0)) / 100  # Convert to fraction
 
 # Additional options
 SEND_TELEGRAM_MESSAGES = True  # Set to True to enable sending Telegram messages
@@ -204,9 +205,10 @@ async def monitor_price(token_address, initial_price, token_decimals, transactio
         await asyncio.sleep(5)
 
     # Calculate and print the amount of ETH received from the sale
-    eth_received = token_amount * current_price
-    profit_or_loss = eth_received - AMOUNT_OF_ETH
-    logging.info(f"Monitoring {monitoring_id} — Would have sold {token_amount} for approximately {eth_received} ETH.")
+    token_amount_to_sell = token_amount * (1 - MOONBAG)
+    eth_received = token_amount_to_sell * current_price
+    profit_or_loss = eth_received - (AMOUNT_OF_ETH * (1 - MOONBAG))
+    logging.info(f"Monitoring {monitoring_id} — Would have sold {token_amount_to_sell} for approximately {eth_received} ETH.")
     
     tx_hash_link = f"[{tx_hash}](https://etherscan.io/tx/{tx_hash})"
     from_name_link = f"[{from_name}](https://etherscan.io/address/{from_address})"
@@ -215,8 +217,9 @@ async def monitor_price(token_address, initial_price, token_decimals, transactio
         f'🟢 *SELL!* 🟢\n\n'
         f'*From:*\n{from_name_link}\n\n'
         f'*Original Transaction Hash:*\n{tx_hash_link}\n\n'
-        f'*Action:*\nSold {token_amount} [{symbol}](https://etherscan.io/token/{token_address}) for approximately {eth_received} ETH.\n\n'
-        f'*Profit/Loss:*\n{profit_or_loss} ETH.'
+        f'*Action:*\nSold {token_amount_to_sell} [{symbol}](https://etherscan.io/token/{token_address}) for approximately {eth_received} ETH.\n\n'
+        f'*Profit/Loss:*\n{profit_or_loss} ETH.\n\n'
+        f'*Moonbag:*\n{token_amount * MOONBAG} {symbol}'
     )
     send_telegram_message(insert_zero_width_space(messageS))
 
