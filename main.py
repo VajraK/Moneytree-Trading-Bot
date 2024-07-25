@@ -169,18 +169,25 @@ def calculate_token_amount(eth_amount, token_price):
 
 def insert_zero_width_space(text):
     """
-    Inserts a zero-width space after the fifth digit in a sequence of exactly nine digits 
-    following a dot or nine digits preceding a dot.
+    Inserts a zero-width space between each digit in sequences of exactly nine digits
+    followed by a dot or preceded by a dot.
     """
     zero_width_space = '\u200B'
     
-    # Pattern for nine digits following a dot
-    pattern_following_dot = r'(\.\d{5})(\d{4})(?=\D|$)'
-    text = re.sub(pattern_following_dot, r'\1' + zero_width_space + r'\2', text)
+    # Pattern for nine digits followed by a dot
+    pattern_following_dot = r'(\d{9})(\.)'
+    # Pattern for nine digits preceded by a dot
+    pattern_preceding_dot = r'(\.)(\d{9})'
     
-    # Pattern for nine digits preceding a dot
-    pattern_preceding_dot = r'(\d{5})(\d{4}\.)(?=\D|$)'
-    text = re.sub(pattern_preceding_dot, r'\1' + zero_width_space + r'\2', text)
+    def insert_spaces_following_dot(match):
+        return zero_width_space.join(match.group(1)) + match.group(2)
+    
+    def insert_spaces_preceding_dot(match):
+        return match.group(1) + zero_width_space.join(match.group(2))
+    
+    # Apply substitutions
+    text = re.sub(pattern_following_dot, insert_spaces_following_dot, text)
+    text = re.sub(pattern_preceding_dot, insert_spaces_preceding_dot, text)
     
     return text
 
