@@ -203,15 +203,15 @@ def calculate_token_amount(eth_amount, token_price):
 
 def insert_zero_width_space(text):
     """
-    Inserts a zero-width space between each digit in sequences of exactly nine digits
+    Inserts a zero-width space between each digit in sequences of 9 to 30 digits
     followed by a dot or preceded by a dot.
     """
     zero_width_space = '\u200B'
     
-    # Pattern for nine digits followed by a dot
-    pattern_following_dot = r'(\d{9})(\.)'
-    # Pattern for nine digits preceded by a dot
-    pattern_preceding_dot = r'(\.)(\d{9})'
+    # Pattern for 9 to 30 digits followed by a dot
+    pattern_following_dot = r'(\d{9,30})(\.)'
+    # Pattern for 9 to 30 digits preceded by a dot
+    pattern_preceding_dot = r'(\.)(\d{9,30})'
     
     def insert_spaces_following_dot(match):
         return zero_width_space.join(match.group(1)) + match.group(2)
