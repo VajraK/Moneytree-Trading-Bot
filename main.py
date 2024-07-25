@@ -27,6 +27,7 @@ FILTER_FROM_ADDRESSES = [addr.strip() for addr in os.getenv('FILTER_FROM_ADDRESS
 INFURA_URL = os.getenv('INFURA_URL')
 WETH_ADDRESS = '0xC02aaA39b223FE8D0A0E5C4F27eAD9083C756Cc2'
 UNISWAP_V2_FACTORY_ADDRESS = '0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f'
+UNISWAP_V3_FACTORY_ADDRESS = '0x1F98431c8aD98523631AE4a59f267346ea31F984'  # Uniswap V3 Factory Address
 AMOUNT_OF_ETH = float(os.getenv('AMOUNT_OF_ETH'))
 PRICE_INCREASE_THRESHOLD = float(os.getenv('PRICE_INCREASE_THRESHOLD')) / 100  # Convert to fraction
 PRICE_DECREASE_THRESHOLD = float(os.getenv('PRICE_DECREASE_THRESHOLD')) / 100  # Convert to fraction
@@ -55,8 +56,17 @@ with open('IUniswapV2Pair.json') as file:
 with open('IUniswapV2ERC20.json') as file:
     uniswap_v2_erc20_abi = json.load(file)["abi"]
 
-# Create factory contract instance
+# Load the Uniswap V3 Factory ABI
+with open('IUniswapV3Factory.json') as file:
+    uniswap_v3_factory_abi = json.load(file)
+
+# Load the Uniswap V3 Pool ABI
+with open('IUniswapV3Pool.json') as file:
+    uniswap_v3_pool_abi = json.load(file)
+
+# Create factory contract instances
 uniswap_v2_factory = web3.eth.contract(address=Web3.to_checksum_address(UNISWAP_V2_FACTORY_ADDRESS), abi=uniswap_v2_factory_abi)
+uniswap_v3_factory = web3.eth.contract(address=Web3.to_checksum_address(UNISWAP_V3_FACTORY_ADDRESS), abi=uniswap_v3_factory_abi)
 
 def send_telegram_message(message):
     """
@@ -119,7 +129,7 @@ def filter_message(data):
 def extract_token_address(action_text):
     # Use regex to find the token address in the action text after 'ETH For'
     eth_for_index = action_text.find('ETH For')
-    if eth_for_index == -1:
+    if (eth_for_index == -1):
         return None
     action_text_after_eth_for = action_text[eth_for_index:]
     match = re.search(r'https://etherscan.io/token/0x[0-9a-fA-F]{40}', action_text_after_eth_for)
@@ -135,12 +145,11 @@ def get_token_details(token_address):
     decimals = token_contract.functions.decimals().call()
     return name, symbol, decimals
 
-def get_token_price(token_address, token_decimals):
+def get_uniswap_v2_price(token_address, token_decimals):
     # Fetch pair address from Uniswap V2 Factory contract
     pair_address = uniswap_v2_factory.functions.getPair(Web3.to_checksum_address(token_address), Web3.to_checksum_address(WETH_ADDRESS)).call()
     
     if pair_address == '0x0000000000000000000000000000000000000000':
-        logging.info("No pair found for this token.")
         return None, None
 
     # Create pair contract instance
@@ -163,6 +172,31 @@ def get_token_price(token_address, token_decimals):
     # Calculate price
     token_price = adjusted_reserve_weth / adjusted_reserve_token
     return token_price, pair_address
+
+def get_uniswap_v3_price(token_address, token_decimals):
+    fee_tiers = [500, 3000, 10000]
+    
+    for fee in fee_tiers:
+        try:
+            # Fetch pool address from Uniswap V3 Factory contract
+            pool_address = uniswap_v3_factory.functions.getPool(Web3.to_checksum_address(token_address), Web3.to_checksum_address(WETH_ADDRESS), fee).call()
+            
+            if pool_address != '0x0000000000000000000000000000000000000000':
+                
+                # Create pool contract instance
+                pool_contract = web3.eth.contract(address=Web3.to_checksum_address(pool_address), abi=uniswap_v3_pool_abi)
+                
+                # Fetch slot0 from the pool contract
+                slot0 = pool_contract.functions.slot0().call()
+                sqrtPriceX96 = slot0[0]
+
+                # Calculate token price
+                token_price = (sqrtPriceX96 ** 2 / (2 ** 192)) * (10 ** token_decimals) / (10 ** 18)
+                return token_price, pool_address
+        except Exception as e:
+            logging.error(f"Error fetching Uniswap V3 price for fee tier {fee}: {e}")
+    
+    return None, None
 
 def calculate_token_amount(eth_amount, token_price):
     return eth_amount / token_price
@@ -201,11 +235,13 @@ async def monitor_price(token_address, initial_price, token_decimals, transactio
     monitoring_id = tx_hash[:8]  # Create a short identifier for the transaction
 
     while True:
-        current_price, _ = get_token_price(token_address, token_decimals)
+        current_price, _ = get_uniswap_v2_price(token_address, token_decimals)
         if current_price is None:
-            logging.info("Failed to fetch the current price.")
-            await asyncio.sleep(5)
-            continue
+            current_price, _ = get_uniswap_v3_price(token_address, token_decimals)
+            if current_price is None:
+                logging.info("Failed to fetch the current price.")
+                await asyncio.sleep(5)
+                continue
 
         price_increase = (current_price - initial_price) / initial_price
         price_decrease = (initial_price - current_price) / initial_price
@@ -254,9 +290,12 @@ async def transaction():
             name, symbol, decimals = get_token_details(token_address)
             logging.info(f"Token name: {name}")
             logging.info(f"Token symbol: {symbol}")
-            initial_price, pair_address = get_token_price(token_address, decimals)
+            initial_price, pair_address = get_uniswap_v2_price(token_address, decimals)
+            if initial_price is None:
+                initial_price, pair_address = get_uniswap_v3_price(token_address, decimals)
+            
             if initial_price is not None:
-                logging.info(f"Pair address: {pair_address}")
+                logging.info(f"Pair/Pool address: {pair_address}")
                 logging.info(f"Token price: {initial_price} ETH")
                 token_amount = calculate_token_amount(AMOUNT_OF_ETH, initial_price)
                 logging.info(f"Approximately {token_amount} {symbol} would be purchased for {AMOUNT_OF_ETH} ETH.")
@@ -288,7 +327,7 @@ async def transaction():
                 else:
                     await monitor_price(token_address, initial_price, decimals, transaction_details)
             else:
-                logging.info("Token price not available.")
+                logging.info("Token price not available on either Uniswap V2 or V3.")
         else:
             logging.info("Token address not found in the action text.")
     else:
