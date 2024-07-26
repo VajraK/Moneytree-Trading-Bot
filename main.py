@@ -1,20 +1,25 @@
 import asyncio
 from flask import Flask, request, jsonify
 import os
-import re
 import json
-import requests
 import logging
+import requests
+import re
 from web3 import Web3
 from dotenv import load_dotenv
 from asgiref.wsgi import WsgiToAsgi
+from datetime import datetime, timedelta, timezone
+from filters import filter_message, extract_token_address, get_token_details
+from uniswap import get_uniswap_v2_price, get_uniswap_v3_price
+from text_utils import insert_zero_width_space
+from telegram_utils import send_telegram_message
 
 app = Flask(__name__)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger()
-file_handler = logging.FileHandler('mtdb_logs.log')
+file_handler = logging.FileHandler('logs/mtdb_logs.log')
 file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
 logger.addHandler(file_handler)
 
@@ -31,6 +36,8 @@ UNISWAP_V3_FACTORY_ADDRESS = '0x1F98431c8aD98523631AE4a59f267346ea31F984'  # Uni
 AMOUNT_OF_ETH = float(os.getenv('AMOUNT_OF_ETH'))
 PRICE_INCREASE_THRESHOLD = float(os.getenv('PRICE_INCREASE_THRESHOLD')) / 100  # Convert to fraction
 PRICE_DECREASE_THRESHOLD = float(os.getenv('PRICE_DECREASE_THRESHOLD')) / 100  # Convert to fraction
+NO_CHANGE_THRESHOLD_PERCENT = float(os.getenv('NO_CHANGE_THRESHOLD_PERCENT')) / 100  # Convert to fraction
+NO_CHANGE_TIME_MINUTES = int(os.getenv('NO_CHANGE_TIME_MINUTES'))  # Time in minutes
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 MOONBAG = float(os.getenv('MOONBAG', 0)) / 100  # Convert to fraction
@@ -46,184 +53,31 @@ NAME_TO_ADDRESS = dict(zip(FILTER_FROM_NAMES, FILTER_FROM_ADDRESSES))
 web3 = Web3(Web3.HTTPProvider(INFURA_URL))
 
 # Load the Uniswap V2 Factory ABI
-uniswap_v2_factory_abi = json.loads('[{"constant":true,"inputs":[{"internalType":"address","name":"tokenA","type":"address"},{"internalType":"address","name":"tokenB","type":"address"}],"name":"getPair","outputs":[{"internalType":"address","name":"","type":"address"}],"payable":false,"stateMutability":"view","type":"function"}]')
+with open('abis/IUniswapV2Factory.json') as file:
+    uniswap_v2_factory_abi = json.load(file)["abi"]
 
 # Load the Uniswap V2 Pair ABI
-with open('IUniswapV2Pair.json') as file:
+with open('abis/IUniswapV2Pair.json') as file:
     uniswap_v2_pair_abi = json.load(file)["abi"]
 
 # Load the Uniswap V2 ERC20 ABI
-with open('IUniswapV2ERC20.json') as file:
+with open('abis/IUniswapV2ERC20.json') as file:
     uniswap_v2_erc20_abi = json.load(file)["abi"]
 
 # Load the Uniswap V3 Factory ABI
-with open('IUniswapV3Factory.json') as file:
+with open('abis/IUniswapV3Factory.json') as file:
     uniswap_v3_factory_abi = json.load(file)
 
 # Load the Uniswap V3 Pool ABI
-with open('IUniswapV3Pool.json') as file:
+with open('abis/IUniswapV3Pool.json') as file:
     uniswap_v3_pool_abi = json.load(file)
 
 # Create factory contract instances
 uniswap_v2_factory = web3.eth.contract(address=Web3.to_checksum_address(UNISWAP_V2_FACTORY_ADDRESS), abi=uniswap_v2_factory_abi)
 uniswap_v3_factory = web3.eth.contract(address=Web3.to_checksum_address(UNISWAP_V3_FACTORY_ADDRESS), abi=uniswap_v3_factory_abi)
 
-def send_telegram_message(message):
-    """
-    Sends a message to the configured Telegram chat.
-    """
-    if not SEND_TELEGRAM_MESSAGES:
-        logging.info("Sending Telegram messages is disabled.")
-        logging.info(f"Message that would be sent: {message}")
-        return
-
-    url = f'https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage'
-    
-    # Escape special characters for MarkdownV2
-    escape_chars = r'\_~`>#+-=|{}.!'
-    escaped_message = re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', message)
-
-    data = {
-        'chat_id': TELEGRAM_CHAT_ID,
-        'text': escaped_message,
-        'parse_mode': 'MarkdownV2',
-        'disable_web_page_preview': True
-    }
-
-    logging.info(f"Sending Telegram message: {escaped_message}")
-
-    try:
-        response = requests.post(url, data=data)
-        response.raise_for_status()
-        logging.info(f"Telegram response: {response.json()}")
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Error sending message to Telegram: {e}")
-        if response is not None:
-            logging.error(f"Response content: {response.content}")
-
-def filter_message(data):
-    from_name = data.get('from_name')
-    action_text = data.get('action_text')
-    passed_filters = []
-
-    # Remove backslashes from action_text
-    action_text_cleaned = action_text.replace('\\', '')
-
-    # Check if from_name matches any of the names in FILTER_FROM_NAMES
-    if from_name in FILTER_FROM_NAMES:
-        logging.info(f"FILTER 1 — 'from_name' : '{from_name}' — PASSED")
-        passed_filters.append("'from_name'")
-    else:
-        logging.info(f"FILTER 1 — 'from_name': '{from_name}' — FAILED")
-        return False
-
-    # Check if action_text_cleaned includes 'ETH For'
-    if 'ETH For' in action_text_cleaned:
-        logging.info(f"FILTER 2 — 'action_text' includes 'ETH For' — PASSED")
-        passed_filters.append("'action_text'")
-        return True
-
-    logging.info(f"FILTER 2 — 'action_text' does not include 'ETH For' — FAILED")
-    return False
-
-def extract_token_address(action_text):
-    # Use regex to find the token address in the action text after 'ETH For'
-    eth_for_index = action_text.find('ETH For')
-    if (eth_for_index == -1):
-        return None
-    action_text_after_eth_for = action_text[eth_for_index:]
-    match = re.search(r'https://etherscan.io/token/0x[0-9a-fA-F]{40}', action_text_after_eth_for)
-    if match:
-        token_address = match.group().split('/')[-1]
-        return token_address
-    return None
-
-def get_token_details(token_address):
-    token_contract = web3.eth.contract(address=Web3.to_checksum_address(token_address), abi=uniswap_v2_erc20_abi)
-    name = token_contract.functions.name().call()
-    symbol = token_contract.functions.symbol().call()
-    decimals = token_contract.functions.decimals().call()
-    return name, symbol, decimals
-
-def get_uniswap_v2_price(token_address, token_decimals):
-    # Fetch pair address from Uniswap V2 Factory contract
-    pair_address = uniswap_v2_factory.functions.getPair(Web3.to_checksum_address(token_address), Web3.to_checksum_address(WETH_ADDRESS)).call()
-    
-    if pair_address == '0x0000000000000000000000000000000000000000':
-        return None, None
-
-    # Create pair contract instance
-    pair_contract = web3.eth.contract(address=Web3.to_checksum_address(pair_address), abi=uniswap_v2_pair_abi)
-    
-    # Fetch reserves from the pair contract
-    reserves = pair_contract.functions.getReserves().call()
-    reserve_weth, reserve_token = reserves[0], reserves[1]
-
-    # Determine which reserve is for WETH and which is for the token
-    if Web3.to_checksum_address(token_address) < Web3.to_checksum_address(WETH_ADDRESS):
-        reserve_token, reserve_weth = reserves[0], reserves[1]
-    else:
-        reserve_weth, reserve_token = reserves[0], reserves[1]
-
-    # Adjust reserves
-    adjusted_reserve_token = reserve_token / (10 ** token_decimals)
-    adjusted_reserve_weth = reserve_weth / (10 ** 18)
-
-    # Calculate price
-    token_price = adjusted_reserve_weth / adjusted_reserve_token
-    return token_price, pair_address
-
-def get_uniswap_v3_price(token_address, token_decimals):
-    fee_tiers = [500, 3000, 10000]
-    
-    for fee in fee_tiers:
-        try:
-            # Fetch pool address from Uniswap V3 Factory contract
-            pool_address = uniswap_v3_factory.functions.getPool(Web3.to_checksum_address(token_address), Web3.to_checksum_address(WETH_ADDRESS), fee).call()
-            
-            if pool_address != '0x0000000000000000000000000000000000000000':
-                
-                # Create pool contract instance
-                pool_contract = web3.eth.contract(address=Web3.to_checksum_address(pool_address), abi=uniswap_v3_pool_abi)
-                
-                # Fetch slot0 from the pool contract
-                slot0 = pool_contract.functions.slot0().call()
-                sqrtPriceX96 = slot0[0]
-
-                # Calculate token price
-                token_price = (sqrtPriceX96 ** 2 / (2 ** 192)) * (10 ** token_decimals) / (10 ** 18)
-                return token_price, pool_address
-        except Exception as e:
-            logging.error(f"Error fetching Uniswap V3 price for fee tier {fee}: {e}")
-    
-    return None, None
-
 def calculate_token_amount(eth_amount, token_price):
     return eth_amount / token_price
-
-def insert_zero_width_space(text):
-    """
-    Inserts a zero-width space between each digit in sequences of 9 to 30 digits
-    followed by a dot or preceded by a dot.
-    """
-    zero_width_space = '\u200B'
-    
-    # Pattern for 9 to 30 digits followed by a dot
-    pattern_following_dot = r'(\d{9,30})(\.)'
-    # Pattern for 9 to 30 digits preceded by a dot
-    pattern_preceding_dot = r'(\.)(\d{9,30})'
-    
-    def insert_spaces_following_dot(match):
-        return zero_width_space.join(match.group(1)) + match.group(2)
-    
-    def insert_spaces_preceding_dot(match):
-        return match.group(1) + zero_width_space.join(match.group(2))
-    
-    # Apply substitutions
-    text = re.sub(pattern_following_dot, insert_spaces_following_dot, text)
-    text = re.sub(pattern_preceding_dot, insert_spaces_preceding_dot, text)
-    
-    return text
 
 async def monitor_price(token_address, initial_price, token_decimals, transaction_details):
     from_name = transaction_details['from_name']
@@ -234,10 +88,14 @@ async def monitor_price(token_address, initial_price, token_decimals, transactio
     
     monitoring_id = tx_hash[:8]  # Create a short identifier for the transaction
 
+    start_time = datetime.now(timezone.utc)
+    sell_reason = ''
+    threshold_breached = False
+
     while True:
-        current_price, _ = get_uniswap_v2_price(token_address, token_decimals)
+        current_price, _ = get_uniswap_v2_price(web3, uniswap_v2_factory, token_address, WETH_ADDRESS, token_decimals, uniswap_v2_pair_abi)
         if current_price is None:
-            current_price, _ = get_uniswap_v3_price(token_address, token_decimals)
+            current_price, _ = get_uniswap_v3_price(web3, uniswap_v3_factory, token_address, WETH_ADDRESS, token_decimals, uniswap_v3_pool_abi)
             if current_price is None:
                 logging.info("Failed to fetch the current price.")
                 await asyncio.sleep(5)
@@ -249,50 +107,70 @@ async def monitor_price(token_address, initial_price, token_decimals, transactio
 
         if price_increase >= PRICE_INCREASE_THRESHOLD:
             logging.info(f"Monitoring {monitoring_id} — Current price: {current_price} ETH ({percent_change:.2f}%). — Token price increased by {price_increase * 100:.2f}%. Selling the token.")
+            token_amount_to_sell = token_amount * (1 - MOONBAG)
+            sell_reason = f'Price increased by {price_increase * 100:.2f}%'
             break
         elif price_decrease >= PRICE_DECREASE_THRESHOLD:
             logging.info(f"Monitoring {monitoring_id} — Current price: {current_price} ETH ({percent_change:.2f}%). — Token price decreased by {price_decrease * 100:.2f}%. Selling the token.")
+            token_amount_to_sell = token_amount
+            sell_reason = f'Price decreased by {price_decrease * 100:.2f}%'
             break
+
+        if datetime.now(timezone.utc) - start_time > timedelta(minutes=NO_CHANGE_TIME_MINUTES):
+            if abs(price_increase) < NO_CHANGE_THRESHOLD_PERCENT and abs(price_decrease) < NO_CHANGE_THRESHOLD_PERCENT:
+                logging.info(f"Monitoring {monitoring_id} — Current price: {current_price} ETH ({percent_change:.2f}%). — Price did not change significantly in the first {NO_CHANGE_TIME_MINUTES} minutes. Selling the token.")
+                token_amount_to_sell = token_amount
+                sell_reason = f'Price did not change significantly in the first {NO_CHANGE_TIME_MINUTES} minutes'
+                break
+            else:
+                threshold_breached = True
 
         logging.info(f"Monitoring {monitoring_id} — Current price: {current_price} ETH ({percent_change:.2f}%). — {token_amount} {symbol}.")
         await asyncio.sleep(5)
 
-    # Calculate and print the amount of ETH received from the sale
-    token_amount_to_sell = token_amount * (1 - MOONBAG)
-    eth_received = token_amount_to_sell * current_price
-    profit_or_loss = eth_received - (AMOUNT_OF_ETH * (1 - MOONBAG))
-    logging.info(f"Monitoring {monitoring_id} — Would have sold {token_amount_to_sell} for approximately {eth_received} ETH.")
-    
-    tx_hash_link = f"[{tx_hash}](https://etherscan.io/tx/{tx_hash})"
-    from_name_link = f"[{from_name}](https://etherscan.io/address/{from_address})"
-    
-    messageS = (
-        f'🟢 *SELL!* 🟢\n\n'
-        f'*From:*\n{from_name_link}\n\n'
-        f'*Original Transaction Hash:*\n{tx_hash_link}\n\n'
-        f'*Action:*\nSold {token_amount_to_sell} [{symbol}](https://etherscan.io/token/{token_address}) for approximately {eth_received} ETH.\n\n'
-        f'*Profit/Loss:*\n{profit_or_loss} ETH.\n\n'
-        f'*Moonbag:*\n{token_amount * MOONBAG} {symbol}'
-    )
-    send_telegram_message(insert_zero_width_space(messageS))
+        if threshold_breached:
+            threshold_breached = False  # Reset the flag to continue monitoring
+
+    if not threshold_breached:
+        # Calculate and print the amount of ETH received from the sale
+        eth_received = token_amount_to_sell * current_price
+        profit_or_loss = eth_received - (AMOUNT_OF_ETH * (token_amount_to_sell / token_amount))
+        logging.info(f"Monitoring {monitoring_id} — Sold {token_amount_to_sell} for approximately {eth_received} ETH.")
+        
+        tx_hash_link = f"[{tx_hash}](https://etherscan.io/tx/{tx_hash})"
+        from_name_link = f"[{from_name}](https://etherscan.io/address/{from_address})"
+        
+        messageS = (
+            f'🟢 *SELL!* 🟢\n\n'
+            f'*From:*\n{from_name_link}\n\n'
+            f'*Original Transaction Hash:*\n{tx_hash_link}\n\n'
+            f'*Action:*\nSold {token_amount_to_sell} [{symbol}](https://etherscan.io/token/{token_address}) for approximately {eth_received} ETH.\n\n'
+            f'*Reason:*\n{sell_reason}\n\n'
+            f'*Profit/Loss:*\n{profit_or_loss} ETH.\n\n'
+        )
+        if token_amount_to_sell != token_amount:
+            messageS += f'*Moonbag:*\n{token_amount * MOONBAG} {symbol}'
+        send_telegram_message(insert_zero_width_space(messageS))
+    else:
+        logging.info(f"Monitoring {monitoring_id} — Continuing to monitor price changes after initial period.")
 
 @app.route('/transaction', methods=['POST'])
 async def transaction():
     data = request.json
     logging.info('—————————————————————————————————————————————————————————————————————————————————————————————————————————')
     logging.info(f"Received transaction data: {data}")
-    if filter_message(data):
+    if filter_message(data, FILTER_FROM_NAMES):
         logging.info("Yes, it passes the filters")
         action_text_cleaned = data.get('action_text').replace('\\', '')
         token_address = extract_token_address(action_text_cleaned)
         if token_address:
             logging.info(f"Extracted token address: {token_address}")
-            name, symbol, decimals = get_token_details(token_address)
+            name, symbol, decimals = get_token_details(web3, token_address, uniswap_v2_erc20_abi)
             logging.info(f"Token name: {name}")
             logging.info(f"Token symbol: {symbol}")
-            initial_price, pair_address = get_uniswap_v2_price(token_address, decimals)
+            initial_price, pair_address = get_uniswap_v2_price(web3, uniswap_v2_factory, token_address, WETH_ADDRESS, decimals, uniswap_v2_pair_abi)
             if initial_price is None:
-                initial_price, pair_address = get_uniswap_v3_price(token_address, decimals)
+                initial_price, pair_address = get_uniswap_v3_price(web3, uniswap_v3_factory, token_address, WETH_ADDRESS, decimals, uniswap_v3_pool_abi)
             
             if initial_price is not None:
                 logging.info(f"Pair/Pool address: {pair_address}")
@@ -320,6 +198,9 @@ async def transaction():
                     'tx_hash': tx_hash,
                     'symbol': symbol,
                     'token_amount': token_amount,
+                    'token_address': token_address,
+                    'initial_price': initial_price,
+                    'token_decimals': decimals
                 }
 
                 if ALLOW_MULTIPLE_TRANSACTIONS:
