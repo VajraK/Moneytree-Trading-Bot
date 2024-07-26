@@ -13,6 +13,7 @@ from filters import filter_message, extract_token_address, get_token_details
 from uniswap import get_uniswap_v2_price, get_uniswap_v3_price
 from text_utils import insert_zero_width_space
 from telegram_utils import send_telegram_message
+from market_cap import calculate_market_cap
 
 app = Flask(__name__)
 
@@ -41,6 +42,8 @@ NO_CHANGE_TIME_MINUTES = int(os.getenv('NO_CHANGE_TIME_MINUTES'))  # Time in min
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 MOONBAG = float(os.getenv('MOONBAG', 0)) / 100  # Convert to fraction
+MIN_MARKET_CAP = float(os.getenv('MIN_MARKET_CAP'))  # Minimum market cap in USD
+MAX_MARKET_CAP = float(os.getenv('MAX_MARKET_CAP'))  # Maximum market cap in USD
 
 # Additional options
 SEND_TELEGRAM_MESSAGES = True  # Set to True to enable sending Telegram messages
@@ -165,6 +168,17 @@ async def transaction():
         token_address = extract_token_address(action_text_cleaned)
         if token_address:
             logging.info(f"Extracted token address: {token_address}")
+
+            # Check market cap
+            market_cap_usd = calculate_market_cap(token_address)
+            if market_cap_usd is None:
+                logging.info("Market cap not available. Skipping the buy.")
+                return jsonify({'status': 'failed', 'reason': 'Market cap not available'}), 400
+            
+            if market_cap_usd < MIN_MARKET_CAP or market_cap_usd > MAX_MARKET_CAP:
+                logging.info(f"Market cap {market_cap_usd} USD not within the specified range. Skipping the buy.")
+                return jsonify({'status': 'failed', 'reason': f'Market cap {market_cap_usd} USD not within the specified range'}), 200
+
             name, symbol, decimals = get_token_details(web3, token_address, uniswap_v2_erc20_abi)
             logging.info(f"Token name: {name}")
             logging.info(f"Token symbol: {symbol}")
