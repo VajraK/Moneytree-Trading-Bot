@@ -3,18 +3,16 @@ from flask import Flask, request, jsonify
 import os
 import json
 import logging
-import requests
-import re
 from web3 import Web3
 from dotenv import load_dotenv
 from asgiref.wsgi import WsgiToAsgi
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pieces.filters import filter_message, extract_token_address, get_token_details
 from pieces.uniswap import get_uniswap_v2_price, get_uniswap_v3_price
 from pieces.text_utils import insert_zero_width_space
 from pieces.telegram_utils import send_telegram_message
 from pieces.market_cap import calculate_market_cap
-from pieces.price_change_checker import check_price_change
+from pieces.price_change_checker import check_no_change_threshold
 
 app = Flask(__name__)
 
@@ -49,7 +47,8 @@ MAX_MARKET_CAP = float(os.getenv('MAX_MARKET_CAP'))  # Maximum market cap in USD
 # Additional options
 SEND_TELEGRAM_MESSAGES = True  # Set to True to enable sending Telegram messages
 ALLOW_MULTIPLE_TRANSACTIONS = True  # Set to True to allow multiple concurrent transactions
-ENABLE_MARKET_CAP_FILTER = True # Set to True to enable the Market Cap Filter
+ENABLE_MARKET_CAP_FILTER = True  # Set to True to enable the Market Cap Filter
+ENABLE_PRICE_CHANGE_CHECKER = True  # Set to True to enable the Price Change Checker
 
 # Create a dictionary mapping names to addresses
 NAME_TO_ADDRESS = dict(zip(FILTER_FROM_NAMES, FILTER_FROM_ADDRESSES))
@@ -95,7 +94,7 @@ async def monitor_price(token_address, initial_price, token_decimals, transactio
 
     start_time = datetime.now(timezone.utc)
     sell_reason = ''
-    threshold_breached = False
+    price_history = []
 
     while True:
         current_price, _ = get_uniswap_v2_price(web3, uniswap_v2_factory, token_address, WETH_ADDRESS, token_decimals, uniswap_v2_pair_abi)
@@ -105,6 +104,8 @@ async def monitor_price(token_address, initial_price, token_decimals, transactio
                 logging.info("Failed to fetch the current price.")
                 await asyncio.sleep(5)
                 continue
+
+        price_history.append((datetime.now(timezone.utc), current_price))
 
         price_increase = (current_price - initial_price) / initial_price
         price_decrease = (initial_price - current_price) / initial_price
@@ -121,31 +122,36 @@ async def monitor_price(token_address, initial_price, token_decimals, transactio
             sell_reason = f'Price decreased by {price_decrease * 100:.2f}%'
             break
 
-        no_change, token_amount_to_sell, sell_reason = check_price_change(current_price, initial_price, start_time, monitoring_id, symbol, token_amount)
-        if no_change:
-            break
+        if ENABLE_PRICE_CHANGE_CHECKER:
+            no_change, token_amount_to_sell, sell_reason, start_time = check_no_change_threshold(start_time, price_history, monitoring_id, symbol, token_amount)
+            if no_change:
+                break
 
+        logging.info(f"Monitoring {monitoring_id} — Current price: {current_price} ETH ({percent_change:.2f}%). — {token_amount} {symbol}.")
         await asyncio.sleep(5)
 
-    # Calculate and print the amount of ETH received from the sale
-    eth_received = token_amount_to_sell * current_price
-    profit_or_loss = eth_received - (AMOUNT_OF_ETH * (token_amount_to_sell / token_amount))
-    logging.info(f"Monitoring {monitoring_id} — Sold {token_amount_to_sell} for approximately {eth_received} ETH.")
-    
-    tx_hash_link = f"[{tx_hash}](https://etherscan.io/tx/{tx_hash})"
-    from_name_link = f"[{from_name}](https://etherscan.io/address/{from_address})"
-    
-    messageS = (
-        f'🟢 *SELL!* 🟢\n\n'
-        f'*From:*\n{from_name_link}\n\n'
-        f'*Original Transaction Hash:*\n{tx_hash_link}\n\n'
-        f'*Action:*\nSold {token_amount_to_sell} [{symbol}](https://etherscan.io/token/{token_address}) for approximately {eth_received} ETH.\n\n'
-        f'*Reason:*\n{sell_reason}\n\n'
-        f'*Profit/Loss:*\n{profit_or_loss} ETH.\n\n'
-    )
-    if token_amount_to_sell != token_amount:
-        messageS += f'*Moonbag:*\n{token_amount * MOONBAG} {symbol}'
-    send_telegram_message(insert_zero_width_space(messageS))
+    if token_amount_to_sell is not None:
+        # Calculate and print the amount of ETH received from the sale
+        eth_received = token_amount_to_sell * current_price
+        profit_or_loss = eth_received - (AMOUNT_OF_ETH * (token_amount_to_sell / token_amount))
+        logging.info(f"Monitoring {monitoring_id} — Sold {token_amount_to_sell} for approximately {eth_received} ETH.")
+        
+        tx_hash_link = f"[{tx_hash}](https://etherscan.io/tx/{tx_hash})"
+        from_name_link = f"[{from_name}](https://etherscan.io/address/{from_address})"
+        
+        messageS = (
+            f'🟢 *SELL!* 🟢\n\n'
+            f'*From:*\n{from_name_link}\n\n'
+            f'*Original Transaction Hash:*\n{tx_hash_link}\n\n'
+            f'*Action:*\nSold {token_amount_to_sell} [{symbol}](https://etherscan.io/token/{token_address}) for approximately {eth_received} ETH.\n\n'
+            f'*Reason:*\n{sell_reason}\n\n'
+            f'*Profit/Loss:*\n{profit_or_loss} ETH.\n\n'
+        )
+        if token_amount_to_sell != token_amount:
+            messageS += f'*Moonbag:*\n{token_amount * MOONBAG} {symbol}'
+        send_telegram_message(insert_zero_width_space(messageS))
+    else:
+        logging.info(f"Monitoring {monitoring_id} — Continuing to monitor price changes after initial period.")
 
 @app.route('/transaction', methods=['POST'])
 async def transaction():

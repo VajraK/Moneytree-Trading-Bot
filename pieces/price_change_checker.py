@@ -6,18 +6,33 @@ from datetime import datetime, timedelta, timezone
 NO_CHANGE_THRESHOLD_PERCENT = float(os.getenv('NO_CHANGE_THRESHOLD_PERCENT')) / 100  # Convert to fraction
 NO_CHANGE_TIME_MINUTES = int(os.getenv('NO_CHANGE_TIME_MINUTES'))  # Time in minutes
 
-def check_price_change(current_price, initial_price, start_time, monitoring_id, symbol, token_amount):
-    price_increase = (current_price - initial_price) / initial_price
-    price_decrease = (initial_price - current_price) / initial_price
-    percent_change = ((current_price - initial_price) / initial_price) * 100
+def check_no_change_threshold(start_time, price_history, monitoring_id, symbol, token_amount):
+    current_time = datetime.now(timezone.utc)
+    intervals_passed = (current_time - start_time) // timedelta(minutes=NO_CHANGE_TIME_MINUTES)
+    threshold_percent = NO_CHANGE_THRESHOLD_PERCENT * 100  # Convert to percentage for logging
 
-    if datetime.now(timezone.utc) - start_time > timedelta(minutes=NO_CHANGE_TIME_MINUTES):
-        if abs(price_increase) < NO_CHANGE_THRESHOLD_PERCENT and abs(price_decrease) < NO_CHANGE_THRESHOLD_PERCENT:
-            logging.info(f"Monitoring {monitoring_id} — Current price: {current_price} ETH ({percent_change:.2f}%). — Price did not change significantly in the first {NO_CHANGE_TIME_MINUTES} minutes. Selling the token.")
-            return True, token_amount, f'Price did not change significantly in the first {NO_CHANGE_TIME_MINUTES} minutes'
-        else:
-            logging.info(f"Monitoring {monitoring_id} — Price change threshold breached.")
-            return False, None, None
+    if intervals_passed > 0:
+        for interval in range(intervals_passed):
+            interval_start_time = start_time + timedelta(minutes=interval * NO_CHANGE_TIME_MINUTES)
+            interval_end_time = interval_start_time + timedelta(minutes=NO_CHANGE_TIME_MINUTES)
 
-    logging.info(f"Monitoring {monitoring_id} — Current price: {current_price} ETH ({percent_change:.2f}%). — {token_amount} {symbol}.")
-    return False, None, None
+            # Filter the price history to only include prices within the current interval
+            interval_prices = [price for timestamp, price in price_history if interval_start_time <= timestamp < interval_end_time]
+
+            if not interval_prices:
+                continue
+
+            min_price = min(interval_prices)
+            max_price = max(interval_prices)
+            initial_price = interval_prices[0]
+            price_increase = (max_price - initial_price) / initial_price
+            price_decrease = (initial_price - min_price) / initial_price
+
+            if abs(price_increase) < NO_CHANGE_THRESHOLD_PERCENT and abs(price_decrease) < NO_CHANGE_THRESHOLD_PERCENT:
+                logging.info(f"Monitoring {monitoring_id} — No significant price change detected in interval no. {interval + 1}. Selling the token.")
+                return True, token_amount, f'Price did not change significantly in interval no. {interval + 1} — {threshold_percent:.2f}%.', start_time
+            else:
+                logging.info(f"Monitoring {monitoring_id} — Significant price change detected in interval no. {interval + 1} — {threshold_percent:.2f}%. Continuing monitoring.")
+                return False, None, None, interval_end_time  # Return the updated start time
+
+    return False, None, None, start_time  # Return the original start time if no intervals passed
