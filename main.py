@@ -9,11 +9,12 @@ from web3 import Web3
 from dotenv import load_dotenv
 from asgiref.wsgi import WsgiToAsgi
 from datetime import datetime, timedelta, timezone
-from filters import filter_message, extract_token_address, get_token_details
-from uniswap import get_uniswap_v2_price, get_uniswap_v3_price
-from text_utils import insert_zero_width_space
-from telegram_utils import send_telegram_message
-from market_cap import calculate_market_cap
+from pieces.filters import filter_message, extract_token_address, get_token_details
+from pieces.uniswap import get_uniswap_v2_price, get_uniswap_v3_price
+from pieces.text_utils import insert_zero_width_space
+from pieces.telegram_utils import send_telegram_message
+from pieces.market_cap import calculate_market_cap
+from pieces.price_change_checker import check_price_change
 
 app = Flask(__name__)
 
@@ -48,6 +49,7 @@ MAX_MARKET_CAP = float(os.getenv('MAX_MARKET_CAP'))  # Maximum market cap in USD
 # Additional options
 SEND_TELEGRAM_MESSAGES = True  # Set to True to enable sending Telegram messages
 ALLOW_MULTIPLE_TRANSACTIONS = True  # Set to True to allow multiple concurrent transactions
+ENABLE_MARKET_CAP_FILTER = True # Set to True to enable the Market Cap Filter
 
 # Create a dictionary mapping names to addresses
 NAME_TO_ADDRESS = dict(zip(FILTER_FROM_NAMES, FILTER_FROM_ADDRESSES))
@@ -119,43 +121,31 @@ async def monitor_price(token_address, initial_price, token_decimals, transactio
             sell_reason = f'Price decreased by {price_decrease * 100:.2f}%'
             break
 
-        if datetime.now(timezone.utc) - start_time > timedelta(minutes=NO_CHANGE_TIME_MINUTES):
-            if abs(price_increase) < NO_CHANGE_THRESHOLD_PERCENT and abs(price_decrease) < NO_CHANGE_THRESHOLD_PERCENT:
-                logging.info(f"Monitoring {monitoring_id} — Current price: {current_price} ETH ({percent_change:.2f}%). — Price did not change significantly in the first {NO_CHANGE_TIME_MINUTES} minutes. Selling the token.")
-                token_amount_to_sell = token_amount
-                sell_reason = f'Price did not change significantly in the first {NO_CHANGE_TIME_MINUTES} minutes'
-                break
-            else:
-                threshold_breached = True
+        no_change, token_amount_to_sell, sell_reason = check_price_change(current_price, initial_price, start_time, monitoring_id, symbol, token_amount)
+        if no_change:
+            break
 
-        logging.info(f"Monitoring {monitoring_id} — Current price: {current_price} ETH ({percent_change:.2f}%). — {token_amount} {symbol}.")
         await asyncio.sleep(5)
 
-        if threshold_breached:
-            threshold_breached = False  # Reset the flag to continue monitoring
-
-    if not threshold_breached:
-        # Calculate and print the amount of ETH received from the sale
-        eth_received = token_amount_to_sell * current_price
-        profit_or_loss = eth_received - (AMOUNT_OF_ETH * (token_amount_to_sell / token_amount))
-        logging.info(f"Monitoring {monitoring_id} — Sold {token_amount_to_sell} for approximately {eth_received} ETH.")
-        
-        tx_hash_link = f"[{tx_hash}](https://etherscan.io/tx/{tx_hash})"
-        from_name_link = f"[{from_name}](https://etherscan.io/address/{from_address})"
-        
-        messageS = (
-            f'🟢 *SELL!* 🟢\n\n'
-            f'*From:*\n{from_name_link}\n\n'
-            f'*Original Transaction Hash:*\n{tx_hash_link}\n\n'
-            f'*Action:*\nSold {token_amount_to_sell} [{symbol}](https://etherscan.io/token/{token_address}) for approximately {eth_received} ETH.\n\n'
-            f'*Reason:*\n{sell_reason}\n\n'
-            f'*Profit/Loss:*\n{profit_or_loss} ETH.\n\n'
-        )
-        if token_amount_to_sell != token_amount:
-            messageS += f'*Moonbag:*\n{token_amount * MOONBAG} {symbol}'
-        send_telegram_message(insert_zero_width_space(messageS))
-    else:
-        logging.info(f"Monitoring {monitoring_id} — Continuing to monitor price changes after initial period.")
+    # Calculate and print the amount of ETH received from the sale
+    eth_received = token_amount_to_sell * current_price
+    profit_or_loss = eth_received - (AMOUNT_OF_ETH * (token_amount_to_sell / token_amount))
+    logging.info(f"Monitoring {monitoring_id} — Sold {token_amount_to_sell} for approximately {eth_received} ETH.")
+    
+    tx_hash_link = f"[{tx_hash}](https://etherscan.io/tx/{tx_hash})"
+    from_name_link = f"[{from_name}](https://etherscan.io/address/{from_address})"
+    
+    messageS = (
+        f'🟢 *SELL!* 🟢\n\n'
+        f'*From:*\n{from_name_link}\n\n'
+        f'*Original Transaction Hash:*\n{tx_hash_link}\n\n'
+        f'*Action:*\nSold {token_amount_to_sell} [{symbol}](https://etherscan.io/token/{token_address}) for approximately {eth_received} ETH.\n\n'
+        f'*Reason:*\n{sell_reason}\n\n'
+        f'*Profit/Loss:*\n{profit_or_loss} ETH.\n\n'
+    )
+    if token_amount_to_sell != token_amount:
+        messageS += f'*Moonbag:*\n{token_amount * MOONBAG} {symbol}'
+    send_telegram_message(insert_zero_width_space(messageS))
 
 @app.route('/transaction', methods=['POST'])
 async def transaction():
@@ -169,15 +159,16 @@ async def transaction():
         if token_address:
             logging.info(f"Extracted token address: {token_address}")
 
-            # Check market cap
-            market_cap_usd = calculate_market_cap(token_address)
-            if market_cap_usd is None:
-                logging.info("Market cap not available. Skipping the buy.")
-                return jsonify({'status': 'failed', 'reason': 'Market cap not available'}), 400
-            
-            if market_cap_usd < MIN_MARKET_CAP or market_cap_usd > MAX_MARKET_CAP:
-                logging.info(f"Market cap {market_cap_usd} USD not within the specified range. Skipping the buy.")
-                return jsonify({'status': 'failed', 'reason': f'Market cap {market_cap_usd} USD not within the specified range'}), 200
+            if ENABLE_MARKET_CAP_FILTER:
+                # Check market cap
+                market_cap_usd = calculate_market_cap(token_address)
+                if market_cap_usd is None:
+                    logging.info("Market cap not available. Skipping the buy.")
+                    return jsonify({'status': 'failed', 'reason': 'Market cap not available'}), 400
+                
+                if market_cap_usd < MIN_MARKET_CAP or market_cap_usd > MAX_MARKET_CAP:
+                    logging.info(f"Market cap {market_cap_usd} USD not within the specified range. Skipping the buy.")
+                    return jsonify({'status': 'failed', 'reason': f'Market cap {market_cap_usd} USD not within the specified range'}), 200
 
             name, symbol, decimals = get_token_details(web3, token_address, uniswap_v2_erc20_abi)
             logging.info(f"Token name: {name}")
