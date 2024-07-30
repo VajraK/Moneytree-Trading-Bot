@@ -83,6 +83,16 @@ uniswap_v3_factory = web3.eth.contract(address=Web3.to_checksum_address(UNISWAP_
 def calculate_token_amount(eth_amount, token_price):
     return eth_amount / token_price
 
+def format_large_number(number):
+    if number >= 1_000_000_000:
+        return f"{number / 1_000_000_000:.1f}B"
+    elif number >= 1_000_000:
+        return f"{number / 1_000_000:.1f}M"
+    elif number >= 1_000:
+        return f"{number / 1_000:.1f}K"
+    else:
+        return str(number)
+
 async def monitor_price(token_address, initial_price, token_decimals, transaction_details):
     from_name = transaction_details['from_name']
     tx_hash = transaction_details['tx_hash']
@@ -199,8 +209,11 @@ async def transaction():
                     f'🟡 *BUY!* 🟡\n\n'
                     f'*From:*\n{from_name_link}\n\n'
                     f'*Original Transaction Hash:*\n{tx_hash_link}\n\n'
-                    f'*Action:*\nApproximately {token_amount} [{symbol}](https://etherscan.io/token/{token_address}) purchased for {AMOUNT_OF_ETH} ETH.\n\n'
+                    f'*Action:*\nApproximately {token_amount} [{symbol}](https://etherscan.io/token/{token_address}) purchased for {AMOUNT_OF_ETH} ETH.\n'
                 )
+                if ENABLE_MARKET_CAP_FILTER:
+                    messageB += f'\n*Market Cap:*\n{format_large_number(market_cap_usd)} USD'
+
                 send_telegram_message(insert_zero_width_space(messageB))
 
                 # Prepare transaction details for monitoring

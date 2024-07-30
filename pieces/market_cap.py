@@ -14,6 +14,7 @@ web3 = Web3(Web3.HTTPProvider(INFURA_URL))
 # Define addresses
 WETH_ADDRESS = '0xC02aaA39b223FE8D0A0E5C4F27eAD9083C756Cc2'
 UNISWAP_V2_FACTORY_ADDRESS = '0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f'
+UNISWAP_V3_FACTORY_ADDRESS = '0x1F98431c8aD98523631AE4a59f267346ea31F984'  # Uniswap V3 Factory Address
 CHAINLINK_ETH_USD_FEED = '0x5f4ec3df9cbd43714fe2740f5e3616155c5b8419'
 
 # Load ABIs
@@ -23,10 +24,16 @@ with open('abis/IUniswapV2Pair.json') as file:
     uniswap_v2_pair_abi = json.load(file)["abi"]
 with open('abis/IUniswapV2ERC20.json') as file:
     uniswap_v2_erc20_abi = json.load(file)["abi"]
+with open('abis/IUniswapV3Factory.json') as file:
+    uniswap_v3_factory_abi = json.load(file)
+with open('abis/IUniswapV3Pool.json') as file:
+    uniswap_v3_pool_abi = json.load(file)
+
 chainlink_price_feed_abi = json.loads('[{"inputs":[],"name":"latestRoundData","outputs":[{"internalType":"uint80","name":"roundId","type":"uint80"},{"internalType":"int256","name":"answer","type":"int256"},{"internalType":"uint256","name":"startedAt","type":"uint256"},{"internalType":"uint256","name":"updatedAt","type":"uint256"},{"internalType":"uint80","name":"answeredInRound","type":"uint80"}],"stateMutability":"view","type":"function"}]')
 
 # Create contract instances
 uniswap_v2_factory = web3.eth.contract(address=Web3.to_checksum_address(UNISWAP_V2_FACTORY_ADDRESS), abi=uniswap_v2_factory_abi)
+uniswap_v3_factory = web3.eth.contract(address=Web3.to_checksum_address(UNISWAP_V3_FACTORY_ADDRESS), abi=uniswap_v3_factory_abi)
 chainlink_price_feed = web3.eth.contract(address=Web3.to_checksum_address(CHAINLINK_ETH_USD_FEED), abi=chainlink_price_feed_abi)
 
 def get_eth_price_in_usd():
@@ -68,6 +75,27 @@ def get_uniswap_v2_price(token_address, token_decimals):
     logging.info(f"Token price on Uniswap V2: {token_price} ETH")
     return token_price, pair_address
 
+def get_uniswap_v3_price(token_address, token_decimals):
+    fee_tiers = [500, 3000, 10000]
+    
+    for fee in fee_tiers:
+        try:
+            # Fetch pool address from Uniswap V3 Factory contract
+            pool_address = uniswap_v3_factory.functions.getPool(Web3.to_checksum_address(token_address), Web3.to_checksum_address(WETH_ADDRESS), fee).call()
+            
+            if pool_address != '0x0000000000000000000000000000000000000000':
+                pool_contract = web3.eth.contract(address=Web3.to_checksum_address(pool_address), abi=uniswap_v3_pool_abi)
+                slot0 = pool_contract.functions.slot0().call()
+                sqrtPriceX96 = slot0[0]
+                token_price = (sqrtPriceX96 ** 2 / (2 ** 192)) * (10 ** token_decimals) / (10 ** 18)
+                logging.info(f"Token price on Uniswap V3 (fee tier {fee}): {token_price} ETH")
+                return token_price, pool_address
+        except Exception as e:
+            logging.error(f"Error fetching Uniswap V3 price for fee tier {fee}: {e}")
+    
+    logging.info("No pool address found on Uniswap V3.")
+    return None, None
+
 def calculate_market_cap(token_address):
     eth_price_in_usd = get_eth_price_in_usd()
     if eth_price_in_usd is None:
@@ -77,11 +105,14 @@ def calculate_market_cap(token_address):
     name, symbol, decimals, total_supply = get_token_details(token_address)
     token_price, pair_address = get_uniswap_v2_price(token_address, decimals)
     
+    if token_price is None:
+        token_price, pair_address = get_uniswap_v3_price(token_address, decimals)
+
     if token_price is not None:
         market_cap_eth = total_supply * token_price
         market_cap_usd = market_cap_eth * eth_price_in_usd
         logging.info(f"Market Cap for {name} ({symbol}) - ETH: {market_cap_eth}, USD: {market_cap_usd}")
         return market_cap_usd
     else:
-        logging.info("Token price not available on Uniswap V2.")
+        logging.info("Token price not available on Uniswap V2 or V3.")
         return None
