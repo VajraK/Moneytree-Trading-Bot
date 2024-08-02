@@ -29,10 +29,10 @@ def check_no_change_threshold(start_time, price_history, monitoring_id, symbol, 
             price_decrease = (initial_price - min_price) / initial_price
 
             if abs(price_increase) < NO_CHANGE_THRESHOLD_PERCENT and abs(price_decrease) < NO_CHANGE_THRESHOLD_PERCENT:
-                logging.info(f"Monitoring {monitoring_id} — No significant price change detected in interval no. {interval + 1}. Selling the token.")
-                return True, token_amount, f'Price did not change significantly in interval no. {interval + 1} — {threshold_percent:.2f}%.', start_time
+                logging.info(f"Monitoring {monitoring_id} — No significant price change — {threshold_percent:.2f}%. — detected in a {NO_CHANGE_TIME_MINUTES} minutes interval. Selling the token.")
+                return True, token_amount, f'Price did not change significantly — {threshold_percent:.2f}%. — in a {NO_CHANGE_TIME_MINUTES} minutes interval.', start_time
             else:
-                logging.info(f"Monitoring {monitoring_id} — Significant price change detected in interval no. {interval + 1} — {threshold_percent:.2f}%. Continuing monitoring.")
+                logging.info(f"Monitoring {monitoring_id} — Significant price — {threshold_percent:.2f}%. — in a {NO_CHANGE_TIME_MINUTES} minutes interval. Continuing monitoring.")
                 return False, None, None, interval_end_time  # Return the updated start time
 
     return False, None, None, start_time  # Return the original start time if no intervals passed

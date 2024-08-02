@@ -13,6 +13,7 @@ from pieces.text_utils import insert_zero_width_space
 from pieces.telegram_utils import send_telegram_message
 from pieces.market_cap import calculate_market_cap
 from pieces.price_change_checker import check_no_change_threshold
+from pieces.trading import buy_token, sell_token, log_transaction_details  # Import the trading functions
 
 app = Flask(__name__)
 
@@ -49,6 +50,7 @@ SEND_TELEGRAM_MESSAGES = True  # Set to True to enable sending Telegram messages
 ALLOW_MULTIPLE_TRANSACTIONS = True  # Set to True to allow multiple concurrent transactions
 ENABLE_MARKET_CAP_FILTER = True  # Set to True to enable the Market Cap Filter
 ENABLE_PRICE_CHANGE_CHECKER = True  # Set to True to enable the Price Change Checker
+ENABLE_TRADING = False  # Set to True to enable trading
 
 # Create a dictionary mapping names to addresses
 NAME_TO_ADDRESS = dict(zip(FILTER_FROM_NAMES, FILTER_FROM_ADDRESSES))
@@ -138,25 +140,39 @@ async def monitor_price(token_address, initial_price, token_decimals, transactio
                 break
 
         logging.info(f"Monitoring {monitoring_id} — Current price: {current_price} ETH ({percent_change:.2f}%). — {token_amount} {symbol}.")
-        await asyncio.sleep(5)
+        await asyncio.sleep(3)
 
     if token_amount_to_sell is not None:
         # Calculate and print the amount of ETH received from the sale
         eth_received = token_amount_to_sell * current_price
         profit_or_loss = eth_received - (AMOUNT_OF_ETH * (token_amount_to_sell / token_amount))
-        logging.info(f"Monitoring {monitoring_id} — Sold {token_amount_to_sell} for approximately {eth_received} ETH.")
         
-        tx_hash_link = f"[{tx_hash}](https://etherscan.io/tx/{tx_hash})"
-        from_name_link = f"[{from_name}](https://etherscan.io/address/{from_address})"
-        
-        messageS = (
-            f'🟢 *SELL!* 🟢\n\n'
-            f'*From:*\n{from_name_link}\n\n'
-            f'*Original Transaction Hash:*\n{tx_hash_link}\n\n'
-            f'*Action:*\nSold {token_amount_to_sell} [{symbol}](https://etherscan.io/token/{token_address}) for approximately {eth_received} ETH.\n\n'
-            f'*Reason:*\n{sell_reason}\n\n'
-            f'*Profit/Loss:*\n{profit_or_loss} ETH.\n\n'
-        )
+        profit_or_loss_display = f"🏆 {profit_or_loss} ETH" if profit_or_loss > 0 else f"{profit_or_loss} ETH"
+
+        # If trading is enabled, execute the sell transaction
+        if ENABLE_TRADING:
+            sell_tx_hash = sell_token(token_address, token_amount_to_sell)
+            logging.info(f"Monitoring {monitoring_id} — Sell transaction sent with hash: {sell_tx_hash}")
+            log_transaction_details(sell_tx_hash)
+            messageS = (
+                f'🟢 *SELL!* 🟢\n\n'
+                f'*From:*\n[{from_name}](https://etherscan.io/address/{from_address})\n\n'
+                f'*Original Transaction Hash:*\n[{tx_hash}](https://etherscan.io/tx/{tx_hash})\n\n'
+                f'*Sell Transaction Hash:*\n[{sell_tx_hash}](https://etherscan.io/tx/{sell_tx_hash})\n\n'
+                f'*Action:*\nSold {token_amount_to_sell} [{symbol}](https://etherscan.io/token/{token_address}) for approximately {eth_received} ETH.\n\n'
+                f'*Reason:*\n{sell_reason}\n\n'
+                f'*Profit/Loss:*\n{profit_or_loss_display}.\n\n'
+            )
+        else:
+            logging.info(f"Monitoring {monitoring_id} — Sold {token_amount_to_sell} for approximately {eth_received} ETH.")
+            messageS = (
+                f'🟢 *SELL!* 🟢\n\n'
+                f'*From:*\n[{from_name}](https://etherscan.io/address/{from_address})\n\n'
+                f'*Original Transaction Hash:*\n[{tx_hash}](https://etherscan.io/tx/{tx_hash})\n\n'
+                f'*Action:*\nSold {token_amount_to_sell} [{symbol}](https://etherscan.io/token/{token_address}) for approximately {eth_received} ETH.\n\n'
+                f'*Reason:*\n{sell_reason}\n\n'
+                f'*Profit/Loss:*\n{profit_or_loss_display}.\n\n'
+            )
         if token_amount_to_sell != token_amount:
             messageS += f'*Moonbag:*\n{token_amount * MOONBAG} {symbol}'
         send_telegram_message(insert_zero_width_space(messageS))
@@ -208,11 +224,23 @@ async def transaction():
                 messageB = (
                     f'🟡 *BUY!* 🟡\n\n'
                     f'*From:*\n{from_name_link}\n\n'
-                    f'*Original Transaction Hash:*\n{tx_hash_link}\n\n'
-                    f'*Action:*\nApproximately {token_amount} [{symbol}](https://etherscan.io/token/{token_address}) purchased for {AMOUNT_OF_ETH} ETH.\n'
+                    f'*Copied Transaction Hash:*\n{tx_hash_link}\n\n'
                 )
                 if ENABLE_MARKET_CAP_FILTER:
-                    messageB += f'\n*Market Cap:*\n{format_large_number(market_cap_usd)} USD'
+                    messageB += f'*Market Cap:*\n{format_large_number(market_cap_usd)} USD\n\n'
+
+                # If trading is enabled, execute the buy transaction
+                if ENABLE_TRADING:
+                    buy_tx_hash = buy_token(token_address, AMOUNT_OF_ETH)
+                    logging.info(f"Buy transaction sent with hash: {buy_tx_hash}")
+                    log_transaction_details(buy_tx_hash)
+                    messageB += f'*Transaction Hash:*\n[{buy_tx_hash}](https://etherscan.io/tx/{buy_tx_hash})\n\n'
+                    # Update the token amount with the actual amount bought
+                    token_amount = calculate_token_amount(AMOUNT_OF_ETH, initial_price)
+
+                messageB += (
+                    f'*Action:*\nApproximately {token_amount} [{symbol}](https://etherscan.io/token/{token_address}) purchased for {AMOUNT_OF_ETH} ETH.\n'
+                )
 
                 send_telegram_message(insert_zero_width_space(messageB))
 
@@ -246,3 +274,4 @@ if __name__ == '__main__':
     asgi_app = WsgiToAsgi(app)
     import uvicorn
     uvicorn.run(asgi_app, host='0.0.0.0', port=5000, timeout_keep_alive=0)
+

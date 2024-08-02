@@ -58,18 +58,28 @@ def get_uniswap_v2_price(token_address, token_decimals):
         logging.info("No pair address found on Uniswap V2.")
         return None, None
 
+    logging.info(f"Pair address found: {pair_address}")
     pair_contract = web3.eth.contract(address=Web3.to_checksum_address(pair_address), abi=uniswap_v2_pair_abi)
     reserves = pair_contract.functions.getReserves().call()
+    
+    reserve0, reserve1 = reserves[0], reserves[1]
+    token0 = pair_contract.functions.token0().call()
 
-    reserve_weth, reserve_token = reserves[0], reserves[1]
-
-    if Web3.to_checksum_address(token_address) < Web3.to_checksum_address(WETH_ADDRESS):
-        reserve_token, reserve_weth = reserves[0], reserves[1]
+    if Web3.to_checksum_address(token_address) == Web3.to_checksum_address(token0):
+        reserve_token = reserve0
+        reserve_weth = reserve1
     else:
-        reserve_weth, reserve_token = reserves[0], reserves[1]
+        reserve_token = reserve1
+        reserve_weth = reserve0
 
     adjusted_reserve_token = reserve_token / (10 ** token_decimals)
     adjusted_reserve_weth = reserve_weth / (10 ** 18)
+
+    logging.info(f"Reserves - Token: {adjusted_reserve_token}, WETH: {adjusted_reserve_weth}")
+
+    if adjusted_reserve_token == 0:
+        logging.error("Adjusted reserve token is zero, cannot calculate token price.")
+        return None, None
 
     token_price = adjusted_reserve_weth / adjusted_reserve_token
     logging.info(f"Token price on Uniswap V2: {token_price} ETH")
