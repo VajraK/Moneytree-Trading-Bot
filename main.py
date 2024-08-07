@@ -149,6 +149,10 @@ async def monitor_price(token_address, initial_price, token_decimals, transactio
         
         profit_or_loss_display = f"🏆 {profit_or_loss} ETH" if profit_or_loss > 0 else f"{profit_or_loss} ETH"
 
+        # LOG the profit or loss and the from_name
+        logging.info(f"LOG—Profit/Loss: {profit_or_loss_display}")
+        logging.info(f"LOG—From: {from_name}")
+
         # If trading is enabled, execute the sell transaction
         if ENABLE_TRADING:
             sell_tx_hash = sell_token(token_address, token_amount_to_sell)

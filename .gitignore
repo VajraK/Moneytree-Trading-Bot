@@ -3,3 +3,4 @@ venv/
 __pycache__/
 mtdb_logs.log
 transaction_state.json
+cleaned_action_texts.log
